@@ -21,6 +21,7 @@
         "lint:fix": "oxlint -c .oxlintrc.json --fix src",
         "lint:styles": "stylelint \"src/**/*.css\"",
         "lint:styles:fix": "stylelint \"src/**/*.css\" --fix",
+        "test": "bun test",
         "tsc": "tsc --noEmit",
         "mcp": "bun run src/plugins/mcp.dev/server.ts",
         "test:patches": "bun run scripts/test-patches.mjs",
