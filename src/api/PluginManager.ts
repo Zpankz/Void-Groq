@@ -15,13 +15,18 @@ import { type Patch, type Plugin, StartAt } from "@utils/types";
 import { addChatBarButton, removeChatBarButton } from "./ChatBarButtons";
 import { addContextMenuItem, type ContextMenuItemDef, type ContextMenuLocation, removeContextMenuItem } from "./ContextMenus";
 import { subscribe as subscribeEvent, type VoidEvent } from "./Events";
-import { getSettingsPluginData, mergePluginSettings, PlainSettings, pluginPath, Settings, SettingsStore, updateSettingsPluginData } from "./Settings";
+import { createHostCapabilities, type HostCapabilities, type SiteId } from "./HostAdapter";
+import { describePluginAvailability, evaluatePluginTree, type PluginAvailability, runWhenPluginAvailable } from "./PluginCatalog";
+import { getActiveSettingsSite, getSettingsDocument, getSettingsPluginData, mergePluginSettings, pluginPath, Settings, SettingsStore, updateSettingsPluginData } from "./Settings";
+import { pruneSitePlugins } from "./SettingsSchema";
 
 const logger = new Logger("PluginManager", "#b4befe");
 
 export const plugins: Record<string, Plugin> = {};
 const pluginUnsubscribers = new Map<string, Array<() => void>>();
 let initialized = false;
+let activeSite: SiteId | null = null;
+let hostCapabilities: HostCapabilities = createHostCapabilities();
 
 const storeRegistry = allStores as unknown as Record<string, Record<string, unknown>>;
 
@@ -32,6 +37,20 @@ function runUnsubs(pluginName: string) {
         try { unsub(); } catch (e) { logger.error(`Unsub error in ${pluginName}:`, e); }
     }
     pluginUnsubscribers.delete(pluginName);
+}
+
+export function setPluginHostContext(site: SiteId, capabilities: HostCapabilities) {
+    activeSite = site;
+    hostCapabilities = capabilities;
+}
+
+export function getPluginAvailability(plugin: Plugin): PluginAvailability {
+    if (!activeSite) return { available: false, reason: "site", supportedSites: plugin.sites ?? ["grok"] };
+    return evaluatePluginTree(plugin, plugins, activeSite, hostCapabilities);
+}
+
+export function getPluginUnavailableReason(plugin: Plugin) {
+    return describePluginAvailability(getPluginAvailability(plugin));
 }
 
 function markAsEnabledDependency(plugin: Plugin) {
@@ -48,7 +67,7 @@ function removePluginContextMenuItems(plugin: Plugin) {
 
 export function isPluginEnabled(pluginName: string): boolean {
     const plugin = plugins[pluginName];
-    if (!plugin) return false;
+    if (!plugin || !getPluginAvailability(plugin).available) return false;
     if (plugin.chrome && !(window as { chrome?: unknown }).chrome) return false;
     if (plugin.required || plugin.isDependency) return true;
     return Settings.plugins[pluginName]?.enabled ?? plugin.enabledByDefault ?? false;
@@ -97,6 +116,7 @@ function startDependenciesRecursive(plugin: Plugin, visiting = new Set<string>()
             return false;
         }
 
+        if (!getPluginAvailability(dep).available) return false;
         markAsEnabledDependency(dep);
 
         visiting.add(depName);
@@ -140,7 +160,7 @@ function ensureMethodsBound(plugin: Plugin) {
     }
 }
 
-export function startPlugin(plugin: Plugin, silent = false): boolean {
+function startAvailablePlugin(plugin: Plugin, silent: boolean): boolean {
     if (plugin.started) return true;
 
     try {
@@ -225,6 +245,11 @@ export function startPlugin(plugin: Plugin, silent = false): boolean {
     }
 }
 
+export function startPlugin(plugin: Plugin, silent = false): boolean {
+    if (!activeSite) return false;
+    return runWhenPluginAvailable(plugin, plugins, activeSite, hostCapabilities, () => startAvailablePlugin(plugin, silent)) ?? false;
+}
+
 export function stopPlugin(plugin: Plugin): boolean {
     if (!plugin.started) return true;
 
@@ -288,12 +313,8 @@ function trackNewPlugins() {
 }
 
 function pruneOrphanedPluginSettings() {
-    const stored = PlainSettings.plugins;
-    const orphaned = Object.keys(stored).filter(name => !plugins[name]);
-    for (const name of orphaned) {
-        logger.info(`Pruning settings for removed plugin: ${name}`);
-        delete stored[name];
-    }
+    const orphaned = pruneSitePlugins(getSettingsDocument(), getActiveSettingsSite(), new Set(Object.keys(plugins)));
+    for (const name of orphaned) logger.info(`Pruning settings for removed plugin: ${name}`);
     if (orphaned.length) SettingsStore.markAsChanged();
 }
 
@@ -324,15 +345,16 @@ export function initPluginManager() {
 
     for (const api of neededApis) {
         const dep = plugins[api];
-        if (dep) markAsEnabledDependency(dep);
+        if (dep && getPluginAvailability(dep).available) markAsEnabledDependency(dep);
     }
 
     for (const [name, plugin] of Object.entries(plugins)) {
-        const enabled = isPluginEnabled(name);
+        const { available } = getPluginAvailability(plugin);
+        const enabled = available && isPluginEnabled(name);
 
         if (enabled) ensureMethodsBound(plugin);
 
-        if (plugin.patches) {
+        if (available && plugin.patches) {
             try {
                 for (const patch of plugin.patches) {
                     if (enabled) addPatch(patch, name);

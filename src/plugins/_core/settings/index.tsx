@@ -13,7 +13,6 @@ import { ErrorBoundary, Flex, Text } from "@components";
 import { BracesIcon, PaletteIcon, TestTubeIcon, UnplugIcon } from "@components/icons";
 import { CustomCSSTab, loadSavedCSS, PluginsTab, ThemesTab } from "@components/settings/tabs";
 import { hasVisibleSettings } from "@components/settings/utils";
-import type { SettingsDescriptionProps, SettingsRowProps, SettingsTitleProps } from "@grok-types";
 import { Tab as ExperimentsTab } from "@plugins/experiments";
 import {
     DropdownMenuItem,
@@ -22,7 +21,6 @@ import {
     DropdownMenuSubTrigger,
 } from "@turbopack/common/components";
 import { createElement, React } from "@turbopack/common/react";
-import { setSettingsPrimitive } from "@turbopack/common/settingsPrimitives";
 import { SettingsDialogStore } from "@turbopack/common/stores";
 import { findExportedComponentLazy } from "@turbopack/turbopack";
 import { Devs } from "@utils/constants";
@@ -175,21 +173,6 @@ export default definePlugin({
 
     _renderVoidMenu: () => createElement(WrappedVoidMenu),
 
-    _setTitle(title: ComponentType<SettingsTitleProps>) {
-        setSettingsPrimitive("SettingsTitle", title);
-        return title;
-    },
-
-    _setDescription(description: ComponentType<SettingsDescriptionProps>) {
-        setSettingsPrimitive("SettingsDescription", description);
-        return description;
-    },
-
-    _setRow(row: ComponentType<SettingsRowProps>) {
-        setSettingsPrimitive("SettingsRow", row);
-        return row;
-    },
-
     _tabEntries() {
         return getVisibleTabs().map(t => ({
             id: t.id,
@@ -197,6 +180,7 @@ export default definePlugin({
             i18nKey: t.name,
             defaultLabel: t.name,
             visible: () => true,
+            group: "other",
             component: t.component,
         }));
     },
@@ -218,11 +202,10 @@ export default definePlugin({
 
     patches: [
         {
-            find: "avatar_menu_click",
-            all: true,
+            find: ["avatar_menu_click", '"user-dropdown.settings"'],
             replacement: {
-                match: /\(0,(\i)\.jsxs\)\((\i)\.DropdownMenuSub,\{children:\[\(0,\1\.jsxs\)\(\2\.DropdownMenuSubTrigger,\{children:\[.{0,100}"user-dropdown\.help"/,
-                replace: "$self._renderVoidMenu(),$&",
+                match: /\(0,(\i)\.jsxs\)\((\i)\.DropdownMenuItem,\{onSelect:\i,children:\[\(0,\1\.jsx\)\(\i\.CogIcon,\{className:"size-4 me-2 text-fg-secondary"\}\),\i\("user-dropdown\.settings","Settings"\)\]\}\)/,
+                replace: "[$&,$self._renderVoidMenu()]",
             },
         },
         {
@@ -231,28 +214,6 @@ export default definePlugin({
                 {
                     match: /\i\.filter\(\i=>\i\.visible\(\i\)\)/,
                     replace: "[...$&,...$self._tabEntries()]",
-                },
-                {
-                    match: /children:(\i\.map\(\i=>\(0,\i\.jsx\)\(\i,\{enterprise:\i\.enterprise,children:.{0,160}?\},\i\.id\)\))\}\)/,
-                    replace: "children:[...$1,$self._renderVersion()]})",
-                },
-            ],
-        },
-        {
-            find: /,\{children:\i,action:\i,hidden:\i,className:\i\}=\i,\i=\(0,\i\.useId\)\(\)/,
-            all: true,
-            replacement: [
-                {
-                    match: /("SettingsTitle",0,)(\i)/,
-                    replace: "$1$self._setTitle($2)",
-                },
-                {
-                    match: /("SettingsDescription",0,)(\i)/,
-                    replace: "$1$self._setDescription($2)",
-                },
-                {
-                    match: /("SettingsRow",0,)(function\(\i\)\{[\s\S]*?\})(,"SettingsSection")/,
-                    replace: "$1$self._setRow($2)$3",
                 },
             ],
         },

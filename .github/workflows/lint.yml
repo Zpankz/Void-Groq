@@ -34,6 +34,15 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run lint:styles
 
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+
   typecheck:
     name: TypeScript
     runs-on: ubuntu-latest

@@ -5,89 +5,80 @@
  */
 
 import { useEffect } from "@turbopack/common/react";
-import { isObject } from "@utils/guards";
 import { idbGet, idbSet } from "@utils/idb";
 import { Logger } from "@utils/Logger";
-import { mergeDefaults } from "@utils/misc";
 import { useForceUpdater } from "@utils/react";
 import { SettingsStore as SettingsStoreClass, STORAGE_KEY } from "@utils/SettingsStore";
 import { type DefinedSettings, OptionType, type PluginSettingDef, type PluginSettingValue, type SettingsChecks, type SettingsDefinition } from "@utils/types";
 
+import { detectSite, type SiteId } from "./HostAdapter";
+import { createSettingsDocument, exportLegacySettings, migrateSettingsDocument, type PluginSettings, type SettingsDocument } from "./SettingsSchema";
+
 const logger = new Logger("Settings");
 
-export type NotificationPosition = "top-right" | "bottom-right";
+export type { NotificationPosition } from "./SettingsSchema";
 
 export interface Settings {
-    plugins: {
-        [plugin: string]: {
-            enabled: boolean;
-            [setting: string]: unknown;
-        };
-    };
-    notifications: {
-        timeout: number;
-        position: NotificationPosition;
-    };
+    plugins: PluginSettings;
+    notifications: SettingsDocument["global"]["notifications"];
 }
 
-const DefaultSettings: Settings = {
-    plugins: {},
-    notifications: {
-        timeout: 5000,
-        position: "bottom-right",
-    },
+const settingsDocument = createSettingsDocument();
+let activeSite: SiteId = "grok";
+
+export const SettingsStore = new SettingsStoreClass(settingsDocument);
+
+export const PlainSettings: Settings = {
+    get plugins() { return settingsDocument.sites[activeSite].plugins; },
+    get notifications() { return settingsDocument.global.notifications; },
+};
+export const Settings: Settings = {
+    get plugins() { return SettingsStore.store.sites[activeSite].plugins; },
+    get notifications() { return SettingsStore.store.global.notifications; },
 };
 
-const settings = {} as Settings;
-mergeDefaults(settings, DefaultSettings);
+export const pluginPath = (name: string, key?: string) => key ? `sites.${activeSite}.plugins.${name}.${key}` : `sites.${activeSite}.plugins.${name}`;
 
-export const SettingsStore = new SettingsStoreClass(settings);
+export function getSettingsDocument() { return settingsDocument; }
+export function getActiveSettingsSite() { return activeSite; }
 
-export const PlainSettings = settings;
-export const Settings = SettingsStore.store;
-
-export const pluginPath = (name: string, key?: string) => key ? `plugins.${name}.${key}` : `plugins.${name}`;
+/**
+ * Exports pre-v1 VoidSettings JSON for rollback to a Grok-only build.
+ * It includes global notifications and Grok plugins, and intentionally omits other site buckets plus every site's experiments and presets.
+ */
+export function exportSettingsForRollback() { return exportLegacySettings(settingsDocument); }
 
 export async function initSettings(): Promise<void> {
-    if (typeof GM_getValue === "function") {
-        try {
-            const raw = GM_getValue(STORAGE_KEY, null);
-            if (raw) {
-                const parsed = JSON.parse(raw);
-                if (isObject(parsed)) Object.assign(settings, parsed);
-            }
-        } catch (e) {
-            logger.error("Failed to load settings:", e);
-        }
-        mergeDefaults(settings, DefaultSettings);
-        return;
-    }
-
+    activeSite = detectSite(window.location) ?? "grok";
     let raw: string | null = null;
+    let readFailed = false;
+    if (typeof GM_getValue === "function") {
+        try { raw = GM_getValue(STORAGE_KEY, null); } catch (e) { readFailed = true; logger.error("Failed to load settings:", e); }
+    } else {
 
-    try {
-        raw = await idbGet<string>(STORAGE_KEY) ?? null;
-    } catch (e) {
-        logger.warn("Failed to read IndexedDB:", e);
-    }
-
-    if (!raw) {
-        raw = migrateFromLocalStorage();
-        if (raw) idbSet(STORAGE_KEY, raw).then(() => {
-            try { localStorage.removeItem(STORAGE_KEY); } catch {}
-        }).catch((e: unknown) => logger.debug("Failed to persist settings to IndexedDB:", e));
-    }
-
-    if (raw) {
         try {
-            const parsed = JSON.parse(raw);
-            if (isObject(parsed)) Object.assign(settings, parsed);
+            raw = await idbGet<string>(STORAGE_KEY) ?? null;
         } catch (e) {
-            logger.error("Failed to parse settings:", e);
+            readFailed = true;
+            logger.warn("Failed to read IndexedDB:", e);
+        }
+
+        if (!raw) {
+            raw = migrateFromLocalStorage();
+            if (raw) idbSet(STORAGE_KEY, raw).then(() => {
+                try { localStorage.removeItem(STORAGE_KEY); } catch {}
+            }).catch((e: unknown) => logger.debug("Failed to persist settings to IndexedDB:", e));
         }
     }
 
-    mergeDefaults(settings, DefaultSettings);
+    if (readFailed && !raw) return;
+    try {
+        const { document, changed } = migrateSettingsDocument(raw ? JSON.parse(raw) : null);
+        Object.assign(settingsDocument, document);
+        if (raw && changed) SettingsStore.markAsChanged();
+    } catch (e) {
+        logger.error("Failed to parse settings:", e);
+    }
 }
 
 function migrateFromLocalStorage(): string | null {
@@ -104,49 +95,45 @@ function migrateFromLocalStorage(): string | null {
 }
 
 export function migratePluginSettings(name: string, ...oldNames: string[]) {
-    const { plugins } = SettingsStore.plain;
-    if (name in plugins) return;
+    if (name in Settings.plugins) return;
 
     for (const oldName of oldNames) {
-        if (oldName in plugins) {
-            logger.info(`Migrating settings from old name ${oldName} to ${name}`);
-            plugins[name] = plugins[oldName];
-            delete plugins[oldName];
-            SettingsStore.markAsChanged();
-            break;
-        }
+        if (!(oldName in Settings.plugins)) continue;
+        logger.info(`Migrating settings from old name ${oldName} to ${name}`);
+        Settings.plugins[name] = Settings.plugins[oldName];
+        delete Settings.plugins[oldName];
+        break;
     }
 }
 
 export function migratePluginSetting(pluginName: string, newKey: string, oldKey: string) {
-    const pluginSettings = SettingsStore.plain.plugins[pluginName];
+    const pluginSettings = Settings.plugins[pluginName];
     if (!pluginSettings || !(oldKey in pluginSettings) || newKey in pluginSettings) return;
 
     logger.info(`Migrating setting ${oldKey} -> ${newKey} in ${pluginName}`);
-    pluginSettings[newKey] = pluginSettings[oldKey];
-    delete pluginSettings[oldKey];
-    SettingsStore.markAsChanged();
+    const { [oldKey]: value, ...rest } = pluginSettings;
+    Settings.plugins[pluginName] = { ...rest, [newKey]: value } as typeof pluginSettings;
 }
 
 export function migrateSettingsToPlugin(targetPlugin: string, sourcePlugin: string, ...settingKeys: string[]) {
-    const source = SettingsStore.plain.plugins[sourcePlugin];
+    const source = Settings.plugins[sourcePlugin];
     if (!source) return;
 
-    const target = SettingsStore.plain.plugins[targetPlugin] ??= { enabled: false };
+    const target = { ...(Settings.plugins[targetPlugin] ?? { enabled: false }) };
+    const remaining = { ...source };
     let changed = false;
 
     for (const key of settingKeys) {
-        if (key in source && !(key in target)) {
-            target[key] = source[key];
-            delete source[key];
-            changed = true;
-        }
+        if (!(key in source) || key in target) continue;
+        target[key] = source[key];
+        delete remaining[key];
+        changed = true;
     }
 
-    if (changed) {
-        logger.info(`Migrated settings [${settingKeys.join(", ")}] from ${sourcePlugin} to ${targetPlugin}`);
-        SettingsStore.markAsChanged();
-    }
+    if (!changed) return;
+    logger.info(`Migrated settings [${settingKeys.join(", ")}] from ${sourcePlugin} to ${targetPlugin}`);
+    Settings.plugins[targetPlugin] = target;
+    Settings.plugins[sourcePlugin] = remaining;
 }
 
 export interface SettingsPluginData {

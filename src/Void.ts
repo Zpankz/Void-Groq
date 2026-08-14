@@ -5,16 +5,23 @@
  */
 
 import { checkBuildFingerprint } from "@api/BuildHealth";
-import { initPluginManager, registerPlugin, retryFailedPlugins, startAllPlugins } from "@api/PluginManager";
+import { createHostCapabilities, detectSite } from "@api/HostAdapter";
+import { type HostRuntime,resolveHostRuntime } from "@api/HostRuntime";
+import { describePluginAvailability, evaluatePluginTree } from "@api/PluginCatalog";
+import { initPluginManager, registerPlugin, retryFailedPlugins, setPluginHostContext, startAllPlugins } from "@api/PluginManager";
+import { createOverlayModel, installPortableOverlay, type PortableOverlayHandle } from "@api/PortableOverlay";
+import { Settings } from "@api/Settings";
 import { initStreamEvents } from "@api/StreamEvents";
 import { reportOrphanedPatches } from "@turbopack/patchReport";
-import { _resolveReady, blacklistBadModules, getModuleCache, patches, patchTurbopack, rescanRuntimeModules } from "@turbopack/patchTurbopack";
-import { filters, reportFailedFinders, waitFor } from "@turbopack/turbopack";
+import { _resolveReady, getModuleCache, patches } from "@turbopack/patchTurbopack";
+import { reportFailedFinders } from "@turbopack/turbopack";
 import { Logger } from "@utils/Logger";
 import { onlyOnce } from "@utils/misc";
 import { type Plugin, StartAt } from "@utils/types";
 
 import Plugins from "~plugins";
+
+import { createDefaultGrokRuntime } from "./hosts/grok/runtime";
 
 export { addChatBarButton, removeChatBarButton } from "@api/ChatBarButtons";
 export { addContextMenuItem, removeContextMenuItem } from "@api/ContextMenus";
@@ -24,7 +31,7 @@ export { closeAllModals, closeModal, openModal } from "@api/Modals";
 export { closeNotice, NoticeType, showNotice } from "@api/Notices";
 export { dismissToast, showToast, ToastType } from "@api/Notifications";
 export { addPatch, isPluginEnabled, plugins, registerPlugin, startPlugin, stopPlugin } from "@api/PluginManager";
-export { definePluginSettings, initSettings, migratePluginSetting, migratePluginSettings, migrateSettingsToPlugin, PlainSettings, Settings, SettingsStore } from "@api/Settings";
+export { definePluginSettings, exportSettingsForRollback, initSettings, migratePluginSetting, migratePluginSettings, migrateSettingsToPlugin, PlainSettings, Settings, SettingsStore } from "@api/Settings";
 export { type NotificationPosition } from "@api/Settings";
 export { addLocalTheme, addTheme, disableTheme, enableTheme, getThemes, isOnlineThemesEnabled, isThemesEnabled, removeTheme, setOnlineThemesEnabled, setThemesEnabled, updateLocalTheme } from "@api/Themes";
 export { ErrorBoundary } from "@components/ErrorBoundary";
@@ -46,7 +53,6 @@ export { default as definePlugin, OptionType, type PluginSettingValue, StartAt }
 
 const logger = new Logger("TurbopackPatcher", "#e78284");
 
-const FALLBACK_MS = 15_000;
 const ORPHAN_REPORT_DELAY_MS = 5_000;
 
 function safely(name: string, fn: () => void) {
@@ -61,45 +67,68 @@ function deferOrphanReport() {
     }, ORPHAN_REPORT_DELAY_MS);
 }
 
-function waitForModulesStable() {
-    const fire = onlyOnce(() => {
-        if (cancelWaitFor) cancelWaitFor();
-        clearTimeout(fallbackTimer);
-        rescanRuntimeModules();
+const finishRuntimeReady = onlyOnce(() => {
+    safely("initStreamEvents", initStreamEvents);
+    safely("_resolveReady", _resolveReady);
+    safely("startAllPlugins", () => startAllPlugins(StartAt.TurbopackReady));
 
-        safely("blacklistBadModules", blacklistBadModules);
-        safely("initStreamEvents", initStreamEvents);
-        safely("_resolveReady", _resolveReady);
-        safely("startAllPlugins", () => startAllPlugins(StartAt.TurbopackReady));
+    logger.info(`${getModuleCache().size} modules loaded, ready`);
 
-        logger.info(`${getModuleCache().size} modules loaded, ready`);
-
-        safely("retryFailedPlugins", retryFailedPlugins);
-        safely("deferOrphanReport", deferOrphanReport);
-        safely("checkBuildFingerprint", checkBuildFingerprint);
-    });
-
-    const cancelWaitFor = waitFor(filters.byProps("useRoutingStore", "formatUrl"), fire);
-    const fallbackTimer = setTimeout(fire, FALLBACK_MS);
-}
+    safely("retryFailedPlugins", retryFailedPlugins);
+    safely("deferOrphanReport", deferOrphanReport);
+    safely("checkBuildFingerprint", checkBuildFingerprint);
+});
 
 let _initialized = false;
+let activeRuntime: HostRuntime | null = null;
+let portableOverlay: PortableOverlayHandle | null = null;
+const grokRuntime = createDefaultGrokRuntime();
 
 export function init() {
     if (_initialized) return;
+    const site = detectSite(window.location);
+    if (!site) return;
     _initialized = true;
+    activeRuntime = resolveHostRuntime(site, grokRuntime);
+    if (!activeRuntime) return;
+    const capabilities = site === "grok" ? createHostCapabilities("overlay", "catalog-read", "flag-write", "router-hook", "turbopack") : createHostCapabilities("overlay");
+    setPluginHostContext(site, capabilities);
+    if (site !== "grok") {
+        safely("hostRuntime.install", () => { void activeRuntime?.install(); });
+        safely("portableOverlay.install", () => {
+            portableOverlay = installPortableOverlay({
+                model: createOverlayModel(site, capabilities, Object.values(Plugins).map(plugin => {
+                    const availability = evaluatePluginTree(plugin, Plugins, site, capabilities);
+                    return {
+                        name: plugin.name,
+                        enabled: Settings.plugins[plugin.name]?.enabled ?? plugin.enabledByDefault ?? false,
+                        available: availability.available,
+                        reason: describePluginAvailability(availability) ?? undefined,
+                    };
+                })),
+            });
+        });
+        void Promise.resolve(activeRuntime.ready()).catch((error: unknown) => logger.error("hostRuntime.ready failed:", error));
+        return;
+    }
 
     for (const plugin of Object.values(Plugins)) {
         safely("registerPlugin", () => registerPlugin(plugin as Plugin));
     }
 
     safely("initPluginManager", initPluginManager);
-    safely("patchTurbopack", patchTurbopack);
+    safely("hostRuntime.install", () => { void activeRuntime?.install(); });
     safely("startAllPlugins(Init)", () => startAllPlugins(StartAt.Init));
 
     const fireDomContent = () => safely("startAllPlugins(DOMContentLoaded)", () => startAllPlugins(StartAt.DOMContentLoaded));
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fireDomContent, { once: true });
     else fireDomContent();
 
-    safely("waitForModulesStable", waitForModulesStable);
+    void Promise.resolve(activeRuntime.ready()).then(ready => { if (ready) finishRuntimeReady(); }).catch((error: unknown) => logger.error("hostRuntime.ready failed:", error));
+}
+
+export function teardown() {
+    portableOverlay?.teardown();
+    portableOverlay = null;
+    return activeRuntime?.teardown();
 }

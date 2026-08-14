@@ -5,6 +5,7 @@
  */
 
 import type { VoidEventMap } from "@api/Events";
+import type { HostCapability, SiteId } from "@api/HostAdapter";
 import type * as Stores from "@turbopack/common/stores";
 import type { ReactNode } from "react";
 
@@ -54,6 +55,8 @@ export interface PluginDef {
     stop?(): void;
     patches?: Omit<Patch, "plugin">[];
     dependencies?: string[];
+    sites?: readonly SiteId[];
+    capabilities?: readonly HostCapability[];
     required?: boolean;
     hidden?: boolean;
     dev?: boolean;

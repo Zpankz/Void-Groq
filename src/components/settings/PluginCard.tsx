@@ -7,7 +7,7 @@
 import "./PluginCard.css";
 
 import { dispatch } from "@api/Events";
-import { isNewPlugin, isPluginEnabled, plugins, startPlugin, stopPlugin } from "@api/PluginManager";
+import { getPluginUnavailableReason, isNewPlugin, isPluginEnabled, plugins, startPlugin, stopPlugin } from "@api/PluginManager";
 import { mergePluginSettings } from "@api/Settings";
 import { Badge, Switch } from "@components";
 import { CircleAlertIcon, EllipsisVertical, TriangleAlert } from "@components/icons";
@@ -31,11 +31,13 @@ interface PluginCardProps {
 export default function PluginCard({ name, onSettings, onReload }: PluginCardProps) {
     const plugin = plugins[name];
     const forceUpdate = useForceUpdater();
+    const unavailableReason = getPluginUnavailableReason(plugin);
     const enabled = isPluginEnabled(name);
-    const crashed = enabled && !plugin.started && !plugin.required;
+    const crashed = !unavailableReason && enabled && !plugin.started && !plugin.required;
     const hasPatches = !!plugin.patches?.length;
 
     const handleToggle = () => {
+        if (unavailableReason) return;
         mergePluginSettings(name, { enabled: !enabled });
         if (!enabled) startPlugin(plugin, true);
         else stopPlugin(plugin);
@@ -50,7 +52,7 @@ export default function PluginCard({ name, onSettings, onReload }: PluginCardPro
             name={name}
             badges={
                 <>
-                    {crashed && <TooltipIcon icon={TriangleAlert} tooltip="This plugin failed to start" className={cl("crashed-icon")} />}
+                    {(unavailableReason || crashed) && <TooltipIcon icon={TriangleAlert} tooltip={unavailableReason ?? "This plugin failed to start"} className={cl("crashed-icon")} />}
                     {plugin.required && <TooltipIcon icon={CircleAlertIcon} tooltip="This plugin is required for Void to work" className={cl("required-icon")} />}
                     <PluginBadges plugin={plugin} className={cl("badge")} />
                     {isNewPlugin(name) && <Badge variant="accent">New</Badge>}
@@ -62,7 +64,7 @@ export default function PluginCard({ name, onSettings, onReload }: PluginCardPro
                     {hasVisibleSettings(plugin) && (
                         <IconButton icon={EllipsisVertical} label="Plugin settings" onClick={() => onSettings(name)} />
                     )}
-                    <Switch checked={enabled} disabled={plugin.required} onCheckedChange={handleToggle} />
+                    <Switch checked={enabled} disabled={plugin.required || !!unavailableReason} onCheckedChange={handleToggle} />
                 </>
             }
             footer={<div className={cl("authors")}>{plugin.authors?.join(", ") || "\u00A0"}</div>}
