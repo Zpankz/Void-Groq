@@ -100,7 +100,7 @@ export function migratePluginSettings(name: string, ...oldNames: string[]) {
     for (const oldName of oldNames) {
         if (!(oldName in Settings.plugins)) continue;
         logger.info(`Migrating settings from old name ${oldName} to ${name}`);
-        Settings.plugins[name] = Settings.plugins[oldName];
+        Settings.plugins[name] = structuredClone(PlainSettings.plugins[oldName]);
         delete Settings.plugins[oldName];
         break;
     }

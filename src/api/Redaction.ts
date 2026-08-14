@@ -40,33 +40,51 @@ function categoryForField(key: string) {
     return FIELD_PATTERNS.find(([, pattern]) => pattern.test(key))?.[0];
 }
 
-function addLog(log: RedactionLogEntry[], category: RedactionCategory, path: string) {
+function addLog(log: RedactionLogEntry[], category: RedactionCategory, path: string, count = 1) {
     const existing = log.find(entry => entry.category === category && entry.path === path);
-    if (existing) existing.count++;
-    else log.push({ category, path, count: 1 });
+    if (existing) existing.count += count;
+    else log.push({ category, path, count });
 }
 
 function redactParams(value: string, path: string, log: RedactionLogEntry[]) {
     const params = new URLSearchParams(value);
+    const output = new URLSearchParams();
     let changed = false;
-    for (const key of params.keys()) {
-        if (!URL_SECRET_KEYS.has(key.toLowerCase())) continue;
-        params.set(key, REDACTED);
-        addLog(log, "url-secret", `${path}.${key}`);
-        changed = true;
+    for (const [key, current] of params) {
+        if (URL_SECRET_KEYS.has(key.toLowerCase())) {
+            output.append(key, REDACTED);
+            addLog(log, "url-secret", `${path}.${key}`);
+            changed = true;
+            continue;
+        }
+        const redacted = redactTextAtPath(current, `${path}.${key}`, log);
+        output.append(key, redacted);
+        if (redacted !== current) changed = true;
     }
-    return changed ? params.toString() : value;
+    return changed ? output.toString() : value;
 }
 
 function redactUrl(value: string, path: string, log: RedactionLogEntry[]) {
     const absolute = /^[a-z][a-z\d+.-]*:\/\//i.test(value);
-    if (!absolute && !value.startsWith("/") && !value.startsWith("#")) return value;
+    if (!absolute && !value.startsWith("/") && !value.startsWith("#")) return null;
     let url: URL;
     try {
         url = new URL(value, "https://void.invalid");
     } catch {
-        return value;
+        return null;
     }
+    if (url.username) {
+        url.username = REDACTED;
+        addLog(log, "url-secret", `${path}.username`);
+    }
+    if (url.password) {
+        url.password = REDACTED;
+        addLog(log, "url-secret", `${path}.password`);
+    }
+    let decodedPath = url.pathname;
+    try { decodedPath = decodeURIComponent(decodedPath); } catch {}
+    const pathname = redactTextAtPath(decodedPath, `${path}.path`, log);
+    if (pathname !== decodedPath) url.pathname = pathname;
     const query = redactParams(url.search.slice(1), `${path}.query`, log);
     if (query !== url.search.slice(1)) url.search = query;
     if (url.hash.length > 1) {
@@ -82,9 +100,26 @@ function redactUrl(value: string, path: string, log: RedactionLogEntry[]) {
     return `${url.pathname}${url.search}${url.hash}`;
 }
 
+function redactTextAtPath(value: string, path: string, log: RedactionLogEntry[]) {
+    let redacted = value;
+    for (const [category, pattern] of TEXT_PATTERNS) {
+        let count = 0;
+        redacted = redacted.replace(pattern, match => {
+            count++;
+            const separator = match.search(/[:=]/);
+            return separator < 0 ? REDACTED : `${match.slice(0, separator + 1)} ${REDACTED}`;
+        });
+        if (count) addLog(log, category, path, count);
+    }
+    return redacted;
+}
+
 function redactNode(value: unknown, path: string, log: RedactionLogEntry[]): unknown {
-    if (typeof value === "string") return redactUrl(value, path, log);
-    if (Array.isArray(value)) return value.map((item, index) => redactNode(item, `${path}[${index}]`, log));
+    if (typeof value === "string") {
+        const redactionPath = path || "$";
+        return redactUrl(value, redactionPath, log) ?? redactTextAtPath(value, redactionPath, log);
+    }
+    if (Array.isArray(value)) return value.map((item, index) => redactNode(item, `${path || "$"}[${index}]`, log));
     if (!value || typeof value !== "object") return value;
     const output: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
@@ -105,17 +140,7 @@ export function redactValue<T>(value: T): RedactionResult<T> {
 
 export function redactText(value: string): RedactionResult<string> {
     const log: RedactionLogEntry[] = [];
-    let redacted = value;
-    for (const [category, pattern] of TEXT_PATTERNS) {
-        let count = 0;
-        redacted = redacted.replace(pattern, match => {
-            count++;
-            const separator = match.search(/[:=]/);
-            return separator < 0 ? REDACTED : `${match.slice(0, separator + 1)} ${REDACTED}`;
-        });
-        if (count) log.push({ category, path: "text", count });
-    }
-    return { value: redacted, log };
+    return { value: redactTextAtPath(value, "text", log), log };
 }
 
 export async function persistRedacted<T, R>(value: T, write: (redacted: T) => Promise<R>) {

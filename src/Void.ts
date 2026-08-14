@@ -59,6 +59,16 @@ function safely(name: string, fn: () => void) {
     try { fn(); } catch (e) { logger.error(`${name} failed:`, e); }
 }
 
+async function startHostRuntime(runtime: HostRuntime, onReady?: () => void) {
+    try { await runtime.install(); } catch (error) {
+        logger.error("hostRuntime.install failed:", error);
+        return;
+    }
+    try {
+        if (await runtime.ready()) onReady?.();
+    } catch (error) { logger.error("hostRuntime.ready failed:", error); }
+}
+
 function deferOrphanReport() {
     if (!patches.some(p => !p.all)) return;
     setTimeout(() => {
@@ -94,7 +104,7 @@ export function init() {
     const capabilities = site === "grok" ? createHostCapabilities("overlay", "catalog-read", "flag-write", "router-hook", "turbopack") : createHostCapabilities("overlay");
     setPluginHostContext(site, capabilities);
     if (site !== "grok") {
-        safely("hostRuntime.install", () => { void activeRuntime?.install(); });
+        void startHostRuntime(activeRuntime);
         safely("portableOverlay.install", () => {
             portableOverlay = installPortableOverlay({
                 model: createOverlayModel(site, capabilities, Object.values(Plugins).map(plugin => {
@@ -108,7 +118,6 @@ export function init() {
                 })),
             });
         });
-        void Promise.resolve(activeRuntime.ready()).catch((error: unknown) => logger.error("hostRuntime.ready failed:", error));
         return;
     }
 
@@ -117,14 +126,13 @@ export function init() {
     }
 
     safely("initPluginManager", initPluginManager);
-    safely("hostRuntime.install", () => { void activeRuntime?.install(); });
+    void startHostRuntime(activeRuntime, finishRuntimeReady);
     safely("startAllPlugins(Init)", () => startAllPlugins(StartAt.Init));
 
     const fireDomContent = () => safely("startAllPlugins(DOMContentLoaded)", () => startAllPlugins(StartAt.DOMContentLoaded));
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fireDomContent, { once: true });
     else fireDomContent();
 
-    void Promise.resolve(activeRuntime.ready()).then(ready => { if (ready) finishRuntimeReady(); }).catch((error: unknown) => logger.error("hostRuntime.ready failed:", error));
 }
 
 export function teardown() {

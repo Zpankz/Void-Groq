@@ -18,13 +18,19 @@ test("locks the default Grok runtime to existing patch and readiness seams", asy
     expect(source).toContain("install: patchTurbopack");
     expect(source).toContain('filters.byProps("useRoutingStore", "formatUrl")');
     expect(source).toContain("setTimeout(callback, FALLBACK_MS)");
+    expect(source).toContain("reportError:");
 });
 
-test("keeps Grok readiness out of the shared shell", async () => {
+test("chains runtime readiness to successful installation on every host", async () => {
     const source = await readFile(voidPath, "utf8");
     expect(source).not.toContain("useRoutingStore");
     expect(source).not.toContain('safely("patchTurbopack"');
-    expect(source).toContain("if (ready) finishRuntimeReady()");
+    expect(source).toContain("await runtime.install()");
+    expect(source).toContain("if (await runtime.ready()) onReady?.()");
+    expect(source).toContain('logger.error("hostRuntime.install failed:", error)');
+    expect(source).toContain('logger.error("hostRuntime.ready failed:", error)');
+    expect(source).toContain("void startHostRuntime(activeRuntime);");
+    expect(source).toContain("void startHostRuntime(activeRuntime, finishRuntimeReady);");
 });
 
 test("does not modify Turbopack patch or report implementation", async () => {

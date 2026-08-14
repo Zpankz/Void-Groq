@@ -204,16 +204,21 @@ export default definePlugin({
         {
             find: ["avatar_menu_click", '"user-dropdown.settings"'],
             replacement: {
-                match: /\(0,(\i)\.jsxs\)\((\i)\.DropdownMenuItem,\{onSelect:\i,children:\[\(0,\1\.jsx\)\(\i\.CogIcon,\{className:"size-4 me-2 text-fg-secondary"\}\),\i\("user-dropdown\.settings","Settings"\)\]\}\)/,
-                replace: "[$&,$self._renderVoidMenu()]",
+                match: /(\(0,\i\.jsxs\)\(\i\.DropdownMenuItem,\{onSelect:\i,children:\[[^\]]{0,160}\i\("user-dropdown\.settings","Settings"\)\]\}\))/,
+                replace: "[$1,$self._renderVoidMenu()]",
             },
         },
         {
             find: "pressed_cmd_settings",
+            group: true,
             replacement: [
                 {
                     match: /\i\.filter\(\i=>\i\.visible\(\i\)\)/,
                     replace: "[...$&,...$self._tabEntries()]",
+                },
+                {
+                    match: /(\(0,\i\.jsxs\)\("div",\{className:\i,children:\[\i,\i,\i)(?=\]\}\),.{0,350}?analyticsName:"settings")/,
+                    replace: "$1,$self._renderVersion()",
                 },
             ],
         },

@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { SITE_IDS } from "./HostAdapter";
 import { createSettingsDocument, exportLegacySettings, migrateSettingsDocument, pruneSitePlugins, SETTINGS_SCHEMA_VERSION } from "./SettingsSchema";
 
 const legacy = {
@@ -58,6 +59,78 @@ describe("migrateSettingsDocument", () => {
         const { document } = migrateSettingsDocument({ ...legacy, cookies: ["fake-cookie"], authorization: "Bearer fake" });
         expect(JSON.stringify(document)).not.toContain("fake-cookie");
         expect(JSON.stringify(document)).not.toContain("Bearer fake");
+    });
+
+    test("normalizes malformed v1 documents without treating root fields as legacy", () => {
+        const current = {
+            version: SETTINGS_SCHEMA_VERSION,
+            global: {
+                notifications: { timeout: 7500, position: "top-right" },
+                authorization: "nested-secret",
+            },
+            sites: {
+                grok: {
+                    plugins: {
+                        Keep: { enabled: true, nested: { flags: ["one", "two"] } },
+                        Invalid: { enabled: "yes", privateValue: "drop-me" },
+                    },
+                    experiments: { workspace_agent: true },
+                    presets: { compact: { density: 2 } },
+                    cookies: ["site-secret"],
+                },
+                unexpected: {
+                    plugins: { Foreign: { enabled: true, privateValue: "foreign-secret" } },
+                    experiments: {},
+                    presets: {},
+                },
+            },
+            plugins: { LegacyRoot: { enabled: true, privateValue: "legacy-secret" } },
+            notifications: { timeout: 1, position: "bottom-right" },
+            authorization: "root-secret",
+        };
+
+        const migrated = migrateSettingsDocument(current);
+        expect(migrated.changed).toBeTrue();
+        expect(Object.keys(migrated.document.sites).toSorted()).toEqual([...SITE_IDS].toSorted());
+        expect(migrated.document.global.notifications).toEqual({ timeout: 7500, position: "top-right" });
+        expect(migrated.document.sites.grok).toEqual({
+            plugins: { Keep: { enabled: true, nested: { flags: ["one", "two"] } } },
+            experiments: { workspace_agent: true },
+            presets: { compact: { density: 2 } },
+        });
+        expect(migrated.document.sites.grok.plugins.LegacyRoot).toBeUndefined();
+        expect(JSON.stringify(migrated.document)).not.toMatch(/secret|drop-me/);
+    });
+
+    test("normalizes malformed notification and plugin shapes", () => {
+        const current = createSettingsDocument() as unknown as Record<string, unknown>;
+        const global = current.global as { notifications: Record<string, unknown> };
+        global.notifications = { timeout: -1, position: "center", authorization: "secret" };
+        const sites = current.sites as Record<string, Record<string, unknown>>;
+        sites.claude.plugins = ["not-a-plugin-map"];
+        sites.chatgpt.plugins = {
+            Valid: { enabled: false, payload: { prompt: "preserve-me" } },
+            MissingEnabled: { payload: true },
+            InvalidEnabled: { enabled: 1 },
+        };
+
+        const { document, changed } = migrateSettingsDocument(current);
+        expect(changed).toBeTrue();
+        expect(document.global.notifications).toEqual({ timeout: 5000, position: "bottom-right" });
+        expect(document.sites.claude.plugins).toEqual({});
+        expect(document.sites.chatgpt.plugins).toEqual({ Valid: { enabled: false, payload: { prompt: "preserve-me" } } });
+    });
+
+    test("rejects unknown or incomplete versioned documents instead of migrating legacy roots", () => {
+        for (const current of [
+            { version: 2, plugins: legacy.plugins, notifications: legacy.notifications },
+            { sites: {}, plugins: legacy.plugins, notifications: legacy.notifications },
+            { global: {}, plugins: legacy.plugins, notifications: legacy.notifications },
+        ]) {
+            const { document, changed } = migrateSettingsDocument(current);
+            expect(changed).toBeTrue();
+            expect(document).toEqual(createSettingsDocument());
+        }
     });
 });
 

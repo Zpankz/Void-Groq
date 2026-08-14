@@ -6,7 +6,7 @@
 
 import { describe, expect, mock, test } from "bun:test";
 
-import { persistRedacted, REDACTED,redactText, redactValue } from "./Redaction";
+import { persistRedacted, REDACTED, redactText, redactValue } from "./Redaction";
 
 const fakeJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature";
 
@@ -63,6 +63,82 @@ describe("redactValue", () => {
             { category: "url-secret", path: "hashOnly.hash.access_token", count: 1 },
         ]);
     });
+
+    test("redacts URL credentials without corrupting the hostname", () => {
+        const result = redactValue({ endpoint: "https://user:secret@example.test/path" });
+        const endpoint = new URL(result.value.endpoint);
+        expect(result.value.endpoint).not.toContain("user");
+        expect(result.value.endpoint).not.toContain("secret");
+        expect(endpoint.hostname).toBe("example.test");
+        expect(endpoint.pathname).toBe("/path");
+        expect(result.log).toEqual([
+            { category: "url-secret", path: "endpoint.username", count: 1 },
+            { category: "url-secret", path: "endpoint.password", count: 1 },
+        ]);
+    });
+
+    test("redacts free-form URL path and duplicate query values without touching structure", () => {
+        const result = redactValue({ endpoint: "https://example.test/person%40mail.test?q=first%40mail.test&q=second%40mail.test" });
+        const endpoint = new URL(result.value.endpoint);
+        expect(endpoint.hostname).toBe("example.test");
+        expect(endpoint.searchParams.getAll("q")).toEqual([REDACTED, REDACTED]);
+        expect(result.value.endpoint).not.toContain("mail.test");
+        expect(result.log).toEqual([
+            { category: "email", path: "endpoint.path", count: 1 },
+            { category: "email", path: "endpoint.query.q", count: 2 },
+        ]);
+    });
+
+    test("applies text and URL redaction to every string under ordinary keys and arrays", () => {
+        const result = redactValue({
+            message: `Contact person@example.test with ${fakeJwt}`,
+            nested: {
+                values: [
+                    "Authorization: Bearer array-secret",
+                    { note: "Cookie: sid=cookie-secret", link: "https://example.test/callback?code=destination-secret" },
+                ],
+            },
+        });
+        expect(result.value).toEqual({
+            message: `Contact ${REDACTED} with ${REDACTED}`,
+            nested: {
+                values: [
+                    `Authorization: ${REDACTED}`,
+                    { note: `Cookie: ${REDACTED}`, link: "https://example.test/callback?code=%5BREDACTED%5D" },
+                ],
+            },
+        });
+        expect(result.log).toEqual([
+            { category: "jwt", path: "message", count: 1 },
+            { category: "email", path: "message", count: 1 },
+            { category: "authorization", path: "nested.values[0]", count: 1 },
+            { category: "cookie", path: "nested.values[1].note", count: 1 },
+            { category: "url-secret", path: "nested.values[1].link.query.code", count: 1 },
+        ]);
+        expect(JSON.stringify(result.log)).not.toContain("array-secret");
+        expect(JSON.stringify(result.log)).not.toContain("cookie-secret");
+        expect(JSON.stringify(result.log)).not.toContain("destination-secret");
+    });
+
+    test("redacts root strings and root array strings with their actual paths", () => {
+        expect(redactValue("person@example.test")).toEqual({
+            value: REDACTED,
+            log: [{ category: "email", path: "$", count: 1 }],
+        });
+        expect(redactValue(["person@example.test", [fakeJwt]])).toEqual({
+            value: [REDACTED, [REDACTED]],
+            log: [
+                { category: "email", path: "$[0]", count: 1 },
+                { category: "jwt", path: "$[1][0]", count: 1 },
+            ],
+        });
+    });
+
+    test("counts repeated text redactions at the originating path", () => {
+        const result = redactValue({ note: "first@example.test second@example.test" });
+        expect(result.value).toEqual({ note: `${REDACTED} ${REDACTED}` });
+        expect(result.log).toEqual([{ category: "email", path: "note", count: 2 }]);
+    });
 });
 
 describe("redactText", () => {
@@ -73,6 +149,7 @@ describe("redactText", () => {
         expect(result.value).not.toContain(fakeJwt);
         expect(result.value).not.toContain("sid=fake");
         expect(result.log.map(entry => entry.category)).toEqual(["authorization", "cookie", "jwt", "email"]);
+        expect(result.log.every(entry => entry.path === "text")).toBeTrue();
     });
 });
 

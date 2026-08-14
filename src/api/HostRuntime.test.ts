@@ -59,6 +59,23 @@ describe("HostRuntime", () => {
         expect(events).toEqual(["install", "ready"]);
     });
 
+    test("allows retry after a rejected install", async () => {
+        let attempts = 0;
+        const install = mock(async () => {
+            attempts++;
+            if (attempts === 1) throw new Error("install failed");
+        });
+        const ready = mock(() => true);
+        const managed = createHostRuntime({ id: "grok-turbopack", install, ready, teardown() {} });
+
+        await expect(managed.install()).rejects.toThrow("install failed");
+        await expect(managed.ready()).resolves.toBeFalse();
+        await managed.install();
+        await expect(managed.ready()).resolves.toBeTrue();
+        expect(install).toHaveBeenCalledTimes(2);
+        expect(ready).toHaveBeenCalledTimes(1);
+    });
+
     test("makes teardown idempotent for installed and passive runtimes", async () => {
         const managed = runtime("grok-turbopack");
         await managed.value.install();
