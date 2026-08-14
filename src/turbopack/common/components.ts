@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "./settingsComponents.css";
+
 import type {
     AccordionContentProps, AccordionItemProps, AccordionProps, AccordionTriggerProps,
     AlertDialogContentProps, AlertDialogProps, AvatarProps, BadgeProps, ButtonProps, ButtonWithPopoverProps, ButtonWithTooltipProps,
@@ -25,11 +27,11 @@ import type {
     TabsContentProps, TabsListProps, TabsProps, TabsTriggerProps, TextareaProps,
     TooltipContentProps, TooltipProps, TooltipProviderProps, TooltipTriggerProps,
 } from "@grok-types";
-import type { ComponentType, ReactNode } from "react";
+import { classes, classNameFactory } from "@utils/css";
+import type { ComponentType } from "react";
 
 import { filters, findByProps, findByPropsLazy, findExportedComponent, waitFor } from "../turbopack";
 import { type AnyComponent, createElement, LazyComponent } from "./react";
-import { getSettingsPrimitive } from "./settingsPrimitives";
 
 export type * from "@grok-types";
 
@@ -113,13 +115,11 @@ export const SelectValue = selectLazy<SelectValueProps>("SelectValue");
 
 export const Separator = lazyExport<SeparatorProps>("Separator");
 
-const FallbackSettingsRow = ({ children, action, hidden, className }: SettingsRowProps) => hidden ? null : createElement("div", { className: ["flex items-center justify-between gap-4 px-3 py-2", className].filter(Boolean).join(" ") }, createElement("div", { className: "min-w-0 flex-1" }, children), action);
-const FallbackSettingsTitle = ({ children, className }: SettingsTitleProps) => createElement("div", { className: ["text-sm font-medium text-fg-primary", className].filter(Boolean).join(" ") }, children);
-const FallbackSettingsDescription = ({ children }: SettingsDescriptionProps) => createElement("div", { className: "mt-0.5 text-xs text-fg-secondary" }, children as ReactNode);
+const settingsCl = classNameFactory("void-settings-");
 
-export const SettingsRow = LazyComponent("SettingsRow", () => (getSettingsPrimitive("SettingsRow") ?? FallbackSettingsRow) as AnyComponent) as unknown as ComponentType<SettingsRowProps>;
-export const SettingsTitle = LazyComponent("SettingsTitle", () => (getSettingsPrimitive("SettingsTitle") ?? FallbackSettingsTitle) as AnyComponent) as unknown as ComponentType<SettingsTitleProps>;
-export const SettingsDescription = LazyComponent("SettingsDescription", () => (getSettingsPrimitive("SettingsDescription") ?? FallbackSettingsDescription) as AnyComponent) as unknown as ComponentType<SettingsDescriptionProps>;
+export const SettingsRow = ({ children, action, hidden, className }: SettingsRowProps) => hidden ? null : createElement("div", { className: classes(settingsCl("row"), className) }, createElement("div", { className: settingsCl("row-content") }, children), action);
+export const SettingsTitle = ({ children, className }: SettingsTitleProps) => createElement("div", { className: classes(settingsCl("title"), className) }, children);
+export const SettingsDescription = ({ children }: SettingsDescriptionProps) => createElement("div", { className: settingsCl("description") }, children);
 
 export const Skeleton = lazyExport<SkeletonProps>("Skeleton");
 export const Slider = lazyExport<SliderProps>("Slider");

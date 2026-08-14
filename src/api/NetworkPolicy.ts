@@ -7,6 +7,7 @@
 import type { PolicySite } from "./Policy";
 
 export type TrialRequestCategory =
+    | "untrusted-origin"
     | "passive-read"
     | "telemetry"
     | "completion"
@@ -60,6 +61,14 @@ export interface TrialFetchOptions {
     onBlocked(evidence: BlockedRequestEvidence): void;
 }
 
+const TRUSTED_SITE_ORIGINS: Record<PolicySite, readonly string[]> = {
+    grok: ["https://grok.com", "https://www.grok.com"],
+    claude: ["https://claude.ai", "https://app.claude.ai"],
+    chatgpt: ["https://chatgpt.com", "https://www.chatgpt.com"],
+    perplexity: ["https://perplexity.ai", "https://www.perplexity.ai"],
+    gemini: ["https://gemini.google.com", "https://www.gemini.google.com"],
+    notebooklm: ["https://notebooklm.google.com", "https://www.notebooklm.google.com", "https://notebook.google.com"],
+};
 const PASSIVE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const TELEMETRY_PATTERN = /(^|\/)(log_metric|telemetry|sentry|mixpanel|datadog|rum)(\/|$)/;
 const COMPLETION_PATTERN = /(chat|conversation|completion|responses?|messages?|prompt|stream|ask)/;
@@ -90,19 +99,24 @@ function inspectBody(body: BodyInit | null | undefined) {
         try {
             bodyKeys = getBodyKeys(JSON.parse(body));
         } catch {
-            bodyKeys = [...new URLSearchParams(body).keys()];
+            if (body.includes("=")) bodyKeys = [...new URLSearchParams(body).keys()];
         }
         return { bodyBytes: new TextEncoder().encode(body).byteLength, bodyKeys, bodyText: body.toLowerCase() };
     }
-    if (body instanceof URLSearchParams) return { bodyBytes: body.size, bodyKeys: [...body.keys()], bodyText: "" };
+    if (body instanceof URLSearchParams) return { bodyBytes: new TextEncoder().encode(body.toString()).byteLength, bodyKeys: [...body.keys()], bodyText: "" };
     if (body instanceof Blob) return { bodyBytes: body.size, bodyKeys: [], bodyText: body.type.toLowerCase() };
     if (body instanceof FormData) return { bodyBytes: 0, bodyKeys: [...body.keys()], bodyText: "multipart" };
     return { bodyBytes: 0, bodyKeys: [], bodyText: "" };
 }
 
-function normalizeUrl(input: string | URL | Request, baseUrl: string) {
+function normalizeUrl(input: string | URL | Request, baseUrl?: string) {
     const value = input instanceof Request ? input.url : input.toString();
-    const url = new URL(value, baseUrl);
+    let url: URL;
+    try {
+        url = baseUrl ? new URL(value, baseUrl) : new URL(value);
+    } catch {
+        return { url: null, path: "" };
+    }
     let path = url.pathname;
     try {
         path = decodeURIComponent(path);
@@ -110,6 +124,10 @@ function normalizeUrl(input: string | URL | Request, baseUrl: string) {
         path = url.pathname;
     }
     return { url, path };
+}
+
+function describePath(path: string) {
+    return path.split("/").map(segment => segment ? ":segment" : "").join("/") || "/";
 }
 
 function classify(method: string, url: URL, haystack: string): TrialRequestCategory {
@@ -134,11 +152,19 @@ function classify(method: string, url: URL, haystack: string): TrialRequestCateg
 
 export function classifyTrialRequest(input: TrialRequestInput): TrialRequestDecision {
     const method = (input.method ?? (input.url instanceof Request ? input.url.method : "GET")).toUpperCase();
-    const { url, path } = normalizeUrl(input.url, input.baseUrl);
+    const { url: base } = normalizeUrl(input.baseUrl);
+    const { url, path } = normalizeUrl(input.url, base?.href);
     const headers = new Headers(input.headers ?? (input.url instanceof Request ? input.url.headers : undefined));
     const { bodyBytes, bodyKeys, bodyText } = inspectBody(input.body);
+    const trustedOrigin = !!base
+        && !base.username
+        && !base.password
+        && TRUSTED_SITE_ORIGINS[input.site].includes(base.origin)
+        && url?.origin === base.origin
+        && !url.username
+        && !url.password;
     const haystack = `${path.toLowerCase()} ${bodyKeys.join(" ").toLowerCase()} ${bodyText}`;
-    const category = classify(method, url, haystack);
+    const category = trustedOrigin && url ? classify(method, url, haystack) : "untrusted-origin";
     const blocked = category !== "passive-read" && category !== "telemetry";
     return {
         blocked,
@@ -147,9 +173,9 @@ export function classifyTrialRequest(input: TrialRequestInput): TrialRequestDeci
             site: input.site,
             category,
             method,
-            origin: url.origin,
-            path,
-            queryNames: [...url.searchParams.keys()].toSorted(),
+            origin: url?.origin ?? "",
+            path: describePath(path),
+            queryNames: url ? [...url.searchParams.keys()].toSorted() : [],
             contentType: headers.get("content-type") ?? "",
             bodyBytes,
             bodyKeys,
@@ -175,7 +201,7 @@ export function createTrialFetch(options: TrialFetchOptions): TrialFetch {
             headers: init?.headers,
             body: init?.body,
         });
-        if (!decision.blocked) return options.fetchImpl(input, init);
+        if (!decision.blocked) return options.fetchImpl(input, { ...init, redirect: "error" });
         const evidence = { ...decision.evidence, trialId: options.trialId };
         options.onBlocked(evidence);
         throw new TrialRequestBlockedError(evidence);

@@ -26,14 +26,16 @@ export interface HostRuntimeDefinition {
 
 export function createHostRuntime(definition: HostRuntimeDefinition): HostRuntime {
     let installed = false;
+    let installing: Promise<void> | null = null;
     let tornDown = false;
     return {
         id: definition.id,
         findModule: definition.findModule,
         async install() {
             if (installed || tornDown) return;
-            installed = true;
-            await definition.install();
+            if (installing) return installing;
+            installing = Promise.resolve(definition.install()).then(() => { installed = true; });
+            try { await installing; } finally { installing = null; }
         },
         async ready() {
             if (!installed || tornDown) return false;

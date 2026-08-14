@@ -13,6 +13,7 @@ export interface GrokRuntimeDependencies {
     waitUntilReady(callback: () => void): () => void;
     scheduleFallback(callback: () => void): ReturnType<typeof setTimeout>;
     cancelFallback(timer: ReturnType<typeof setTimeout>): void;
+    reportError(name: string, error: unknown): void;
 }
 
 export function createGrokRuntime(dependencies: GrokRuntimeDependencies): HostRuntime {
@@ -22,13 +23,20 @@ export function createGrokRuntime(dependencies: GrokRuntimeDependencies): HostRu
     const ready = new Promise<boolean>(resolve => { resolveReady = resolve; });
     let complete = false;
 
+    const safely = (name: string, fn: () => void) => {
+        try { fn(); } catch (error) { dependencies.reportError(name, error); }
+    };
+    const cancel = () => {
+        safely("cancelWait", cancelWait);
+        const timer = fallbackTimer;
+        if (timer) safely("cancelFallback", () => dependencies.cancelFallback(timer));
+    };
     const fire = () => {
         if (complete) return;
         complete = true;
-        cancelWait();
-        if (fallbackTimer) dependencies.cancelFallback(fallbackTimer);
-        dependencies.rescan();
-        dependencies.blacklist();
+        cancel();
+        safely("rescan", dependencies.rescan);
+        safely("blacklist", dependencies.blacklist);
         resolveReady(true);
     };
 
@@ -41,9 +49,8 @@ export function createGrokRuntime(dependencies: GrokRuntimeDependencies): HostRu
             return ready;
         },
         teardown() {
-            cancelWait();
-            if (fallbackTimer) dependencies.cancelFallback(fallbackTimer);
             complete = true;
+            cancel();
             resolveReady(false);
         },
     });
